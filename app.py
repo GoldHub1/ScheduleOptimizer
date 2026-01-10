@@ -38,13 +38,33 @@ with st.sidebar:
 
 # --- OPTIMIZATION & DISPLAY ---
 if st.session_state.task_list:
-    st.subheader("🚨 Real-Time Adjustment")
-    # This slider simulates a delay on the task currently in progress
-    delay_mins = st.slider("Current Task Delay (minutes)", 0, 120, 0)
-    delay_delta = timedelta(minutes=delay_mins)
+    st.divider()
 
-    # --- RUN OPTIMIZATION ---
-    optimized_schedule = run_optimization(st.session_state.task_list, active_task_delay=delay_delta)
+    # 1. FIND THE ACTIVE TASK NAME (The Snippet)
+    # We look through the list to see which task's time range includes 'now'
+    active_task_name = "None (Gap)"
+    now = datetime.now()
+
+    for t in st.session_state.task_list:
+        # Check if the task has been scheduled yet
+        if hasattr(t, 'scheduled_start') and t.scheduled_start:
+            t_end = t.scheduled_start + t.true_duration
+            if t.scheduled_start <= now <= t_end:
+                active_task_name = t.name
+                break
+
+    # 2. DISPLAY THE DYNAMIC HEADER
+    st.subheader(f"🚨 Delaying Active Task: {active_task_name}")
+
+    # 3. THE SLIDER
+    delay_mins = st.slider("Additional Minutes to add to this task", 0, 120, 0)
+
+    # 4. CALL THE ENGINE
+    # This passes the slider value into your new interleaved engine
+    optimized_schedule = run_optimization(
+        st.session_state.task_list,
+        active_task_delay=timedelta(minutes=delay_mins)
+    )
 
     # --- DISPLAY ---
     st.write("### Your Adjusted Schedule")
