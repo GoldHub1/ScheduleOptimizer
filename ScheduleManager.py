@@ -2,7 +2,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-
 @dataclass
 class Task:
     id: str
@@ -36,41 +35,94 @@ class Task:
     3. Shrinks flexible tasks based on priority
     """
 
+
 def run_optimization(tasks: List[Task], active_task_delay: timedelta = timedelta(0)) -> List[Task]:
     if not tasks:
         return []
 
-    # Sort tasks: Fixed by time, then flexible
-    sorted_tasks = sorted(tasks, key=lambda x: x.req_start_time if x.req_start_time else datetime.max)
+    now = datetime.now()
 
-    # 1. Apply the delay to the first task in the list (the one currently happening)
-    if sorted_tasks:
-        sorted_tasks[0].true_duration = sorted_tasks[0].ideal_duration + active_task_delay
+    # --- STEP 1: DRY RUN ---
+    # We do a quick pass to see where tasks WOULD be without any new delay
+    fixed_tasks = sorted([t for t in tasks if t.req_start_time], key=lambda x: x.req_start_time)
+    flex_pool = sorted([t for t in tasks if not t.req_start_time], key=lambda x: x.priority, reverse=True)
 
-    # Set initial time
-    first_fixed = next((t for t in sorted_tasks if t.req_start_time), None)
-    current_time = first_fixed.req_start_time if first_fixed else datetime.now()
+    # We use a temporary schedule to find the target
+    dry_run = execute_interleaved_filling(fixed_tasks, flex_pool)
 
-    for i, task in enumerate(sorted_tasks):
-        # Anchor handling
-        if task.req_start_time:
-            task.scheduled_start = task.req_start_time
-            # Only change current_time if this anchor starts AFTER our current progression
-            current_time = max(current_time, task.req_start_time + task.true_duration)
-        else:
-            # Flexible handling
-            task.scheduled_start = current_time
+    # --- STEP 2: FIND TARGET ---
+    target_task = None
 
-            # SQUEEZE LOGIC: Look ahead for the next Fixed Anchor
-            next_anchor = next((t for t in sorted_tasks[i + 1:] if t.req_start_time), None)
+    # Look for the task happening RIGHT NOW in the dry run
+    for t in dry_run:
+        t_end = t.scheduled_start + t.ideal_duration
+        if t.scheduled_start <= now <= t_end:
+            target_task = t
+            break
 
-            if next_anchor:
-                # If this task pushes us past the next anchor, it must shrink
-                if current_time + task.true_duration > next_anchor.req_start_time:
-                    available_gap = next_anchor.req_start_time - current_time
-                    # Don't let it shrink below the explicit min_duration
-                    task.true_duration = max(task.min_duration, available_gap)
+    # Fallback: If we are in a gap, find the very next task to start
+    if not target_task:
+        upcoming = [t for t in dry_run if t.scheduled_start > now]
+        if upcoming:
+            target_task = min(upcoming, key=lambda x: x.scheduled_start)
 
-            current_time += task.true_duration
+    # --- STEP 3: APPLY DELAY ---
+    # Reset all true_durations to ideal first
+    for t in tasks:
+        t.true_duration = t.ideal_duration
 
-    return sorted_tasks
+    if target_task:
+        target_task.true_duration += active_task_delay
+
+    # --- STEP 4: FINAL RUN ---
+    # Run the real interleaved filling with the delayed task
+    return execute_interleaved_filling(fixed_tasks, flex_pool)
+
+
+def execute_interleaved_filling(fixed_tasks: List[Task], flex_pool: List[Task]) -> List[Task]:
+    """
+    The actual 'Gap Filler'. It pours flexible tasks into the spaces
+    between fixed anchors.
+    """
+    final_schedule = []
+    # Use a copy of the flex pool so we don't destroy the original list
+    remaining_flex = list(flex_pool)
+
+    # Determine the start time (use the first fixed task's time or now)
+    if fixed_tasks:
+        current_time = min(fixed_tasks[0].req_start_time, datetime.now())
+    else:
+        current_time = datetime.now()
+
+    for anchor in fixed_tasks:
+        # While there is a gap before the next anchor...
+        while remaining_flex:
+            task = remaining_flex[0]
+
+            # Can it fit in the gap?
+            if current_time + task.true_duration <= anchor.req_start_time:
+                task.scheduled_start = current_time
+                final_schedule.append(remaining_flex.pop(0))
+                current_time += task.true_duration
+            # If it can't fit fully, can it be SQUEEZED?
+            elif current_time + task.min_duration <= anchor.req_start_time:
+                task.scheduled_start = current_time
+                task.true_duration = anchor.req_start_time - current_time
+                final_schedule.append(remaining_flex.pop(0))
+                current_time = anchor.req_start_time
+            else:
+                # Doesn't fit in this gap, stop trying to fill it
+                break
+
+        # Place the Anchor
+        anchor.scheduled_start = anchor.req_start_time
+        final_schedule.append(anchor)
+        current_time = anchor.req_start_time + anchor.true_duration
+
+    # Add any leftover flex tasks at the end
+    for task in remaining_flex:
+        task.scheduled_start = current_time
+        final_schedule.append(task)
+        current_time += task.true_duration
+
+    return sorted(final_schedule, key=lambda x: x.scheduled_start)
